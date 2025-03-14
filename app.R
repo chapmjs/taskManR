@@ -1,4 +1,4 @@
-# Task Manager Shiny App
+# Task Manager Shiny App with SQLite Persistence and Authentication
 # Load required libraries
 library(shiny)
 library(shinydashboard)
@@ -7,160 +7,260 @@ library(readxl)
 library(writexl)
 library(dplyr)
 library(lubridate)
+library(DBI)
+library(RSQLite)
+library(shinymanager) # For authentication
+
+# Database setup function - creates tables if they don't exist
+setup_database <- function(db_path) {
+  # Connect to SQLite database (creates it if it doesn't exist)
+  db <- dbConnect(RSQLite::SQLite(), db_path)
+  
+  # Create tasks table if it doesn't exist
+  if (!dbExistsTable(db, "tasks")) {
+    dbExecute(db, "CREATE TABLE tasks (
+      TaskID INTEGER PRIMARY KEY,
+      TaskName TEXT NOT NULL,
+      TaskCreateDateTime TEXT NOT NULL,
+      TaskCategory TEXT NOT NULL,
+      importance TEXT NOT NULL,
+      urgency TEXT NOT NULL,
+      status TEXT NOT NULL,
+      estimated_time REAL NOT NULL
+    )")
+  }
+  
+  # Create notes table if it doesn't exist
+  if (!dbExistsTable(db, "notes")) {
+    dbExecute(db, "CREATE TABLE notes (
+      NoteID INTEGER PRIMARY KEY,
+      TaskID INTEGER NOT NULL,
+      NoteDateTime TEXT NOT NULL,
+      NoteText TEXT NOT NULL,
+      FOREIGN KEY (TaskID) REFERENCES tasks(TaskID)
+    )")
+  }
+  
+  # Disconnect from database
+  dbDisconnect(db)
+  
+  return(TRUE)
+}
+
+# Database helper functions
+get_all_tasks <- function(db_path) {
+  db <- dbConnect(RSQLite::SQLite(), db_path)
+  tasks <- dbGetQuery(db, "SELECT * FROM tasks")
+  dbDisconnect(db)
+  return(tasks)
+}
+
+get_all_notes <- function(db_path) {
+  db <- dbConnect(RSQLite::SQLite(), db_path)
+  notes <- dbGetQuery(db, "SELECT * FROM notes")
+  dbDisconnect(db)
+  return(notes)
+}
+
+get_max_task_id <- function(db_path) {
+  db <- dbConnect(RSQLite::SQLite(), db_path)
+  max_id <- dbGetQuery(db, "SELECT MAX(TaskID) as max_id FROM tasks")$max_id
+  dbDisconnect(db)
+  return(ifelse(is.na(max_id), 0, max_id))
+}
+
+get_max_note_id <- function(db_path) {
+  db <- dbConnect(RSQLite::SQLite(), db_path)
+  max_id <- dbGetQuery(db, "SELECT MAX(NoteID) as max_id FROM notes")$max_id
+  dbDisconnect(db)
+  return(ifelse(is.na(max_id), 0, max_id))
+}
+
+add_task <- function(db_path, task) {
+  db <- dbConnect(RSQLite::SQLite(), db_path)
+  dbWriteTable(db, "tasks", task, append = TRUE, row.names = FALSE)
+  dbDisconnect(db)
+}
+
+add_note <- function(db_path, note) {
+  db <- dbConnect(RSQLite::SQLite(), db_path)
+  dbWriteTable(db, "notes", note, append = TRUE, row.names = FALSE)
+  dbDisconnect(db)
+}
+
+update_task <- function(db_path, task_id, updates) {
+  db <- dbConnect(RSQLite::SQLite(), db_path)
+  
+  # Build SET clause for SQL
+  set_clause <- paste(names(updates), "=", paste0("'", updates, "'"), collapse = ", ")
+  
+  # Construct and execute the UPDATE statement
+  sql <- sprintf("UPDATE tasks SET %s WHERE TaskID = %d", set_clause, task_id)
+  dbExecute(db, sql)
+  
+  dbDisconnect(db)
+}
+
+# Setup authentication credentials (in real world, use more secure methods)
+credentials <- data.frame(
+  user = c("admin", "user"),
+  password = c("admin123", "user123"),
+  admin = c(TRUE, FALSE),
+  stringsAsFactors = FALSE
+)
 
 # Define UI
-ui <- dashboardPage(
-  dashboardHeader(title = "Task Manager"),
-  dashboardSidebar(
-    sidebarMenu(
-      menuItem("Dashboard", tabName = "dashboard", icon = icon("dashboard")),
-      menuItem("Task List", tabName = "tasklist", icon = icon("list")),
-      menuItem("Add Task", tabName = "addtask", icon = icon("plus")),
-      menuItem("Task Notes", tabName = "tasknotes", icon = icon("sticky-note")),
-      menuItem("Settings", tabName = "settings", icon = icon("cog"))
-    )
-  ),
-  dashboardBody(
-    tabItems(
-      # Dashboard tab
-      tabItem(tabName = "dashboard",
-              fluidRow(
-                valueBoxOutput("totalTasks"),
-                valueBoxOutput("openTasks"),
-                valueBoxOutput("closedTasks")
-              ),
-              fluidRow(
-                box(title = "Tasks by Category", status = "primary", solidHeader = TRUE,
-                    plotOutput("categoryPlot", height = 250)),
-                box(title = "Tasks by Status", status = "primary", solidHeader = TRUE,
-                    plotOutput("statusPlot", height = 250))
-              ),
-              fluidRow(
-                box(title = "Recent Tasks", status = "info", solidHeader = TRUE,
-                    DTOutput("recentTasks"))
-              )
-      ),
-      
-      # Task List tab
-      tabItem(tabName = "tasklist",
-              fluidRow(
-                box(width = 12, title = "Filter Tasks", status = "primary", solidHeader = TRUE,
-                    fluidRow(
-                      column(3, selectInput("statusFilter", "Status:", 
-                                            c("All", "Idea", "Open", "Closed"), selected = "All")),
-                      column(3, selectInput("categoryFilter", "Category:", c("All"), selected = "All")),
-                      column(3, textInput("nameFilter", "Search by Name:", "")),
-                      column(3, actionButton("applyFilter", "Apply Filter", icon = icon("filter"), 
-                                             class = "btn-primary"))
-                    )
-                )
-              ),
-              fluidRow(
-                box(width = 12, title = "Task List", status = "primary", solidHeader = TRUE,
-                    DTOutput("taskTable"),
-                    actionButton("editTaskBtn", "Edit Selected Task", class = "btn-info"),
-                    actionButton("changeStatusBtn", "Change Status", class = "btn-warning")
-                )
-              )
-      ),
-      
-      # Add Task tab
-      tabItem(tabName = "addtask",
-              fluidRow(
-                box(width = 12, title = "Add New Task", status = "success", solidHeader = TRUE,
-                    fluidRow(
-                      column(6, textInput("taskName", "Task Name:", "")),
-                      column(6, selectInput("taskCategory", "Category:", c("Work", "Personal", "Home", "Other")))
-                    ),
-                    fluidRow(
-                      column(4, selectInput("importance", "Importance:", 
-                                            c("Low", "Medium", "High"), selected = "Medium")),
-                      column(4, selectInput("urgency", "Urgency:", 
-                                            c("Low", "Medium", "High"), selected = "Medium")),
-                      column(4, selectInput("status", "Status:", 
-                                            c("Idea", "Open", "Closed"), selected = "Open"))
-                    ),
-                    fluidRow(
-                      column(6, numericInput("estTime", "Estimated Time (hours):", 1, min = 0.1, step = 0.5)),
-                      column(6, textAreaInput("initialNote", "Initial Note:", ""))
-                    ),
-                    actionButton("addTaskBtn", "Add Task", class = "btn-success")
-                )
-              )
-      ),
-      
-      # Task Notes tab
-      tabItem(tabName = "tasknotes",
-              fluidRow(
-                box(width = 6, title = "Select Task", status = "info", solidHeader = TRUE,
-                    selectInput("taskForNotes", "Choose Task:", c("Select a task" = "")),
-                    DTOutput("taskNotesList")
+ui <- function(request) {
+  dashboardPage(
+    dashboardHeader(title = "Task Manager"),
+    dashboardSidebar(
+      sidebarMenu(
+        menuItem("Dashboard", tabName = "dashboard", icon = icon("dashboard")),
+        menuItem("Task List", tabName = "tasklist", icon = icon("list")),
+        menuItem("Add Task", tabName = "addtask", icon = icon("plus")),
+        menuItem("Task Notes", tabName = "tasknotes", icon = icon("sticky-note")),
+        menuItem("Settings", tabName = "settings", icon = icon("cog"))
+      )
+    ),
+    dashboardBody(
+      tabItems(
+        # Dashboard tab
+        tabItem(tabName = "dashboard",
+                fluidRow(
+                  valueBoxOutput("totalTasks"),
+                  valueBoxOutput("openTasks"),
+                  valueBoxOutput("closedTasks")
                 ),
-                box(width = 6, title = "Add Note", status = "success", solidHeader = TRUE,
-                    textAreaInput("newNote", "New Note:", ""),
-                    actionButton("addNoteBtn", "Add Note", class = "btn-success")
+                fluidRow(
+                  box(title = "Tasks by Category", status = "primary", solidHeader = TRUE,
+                      plotOutput("categoryPlot", height = 250)),
+                  box(title = "Tasks by Status", status = "primary", solidHeader = TRUE,
+                      plotOutput("statusPlot", height = 250))
+                ),
+                fluidRow(
+                  box(title = "Recent Tasks", status = "info", solidHeader = TRUE,
+                      DTOutput("recentTasks"))
                 )
-              )
-      ),
-      
-      # Settings tab
-      tabItem(tabName = "settings",
-              fluidRow(
-                box(width = 12, title = "Data Management", status = "warning", solidHeader = TRUE,
-                    fileInput("uploadExcel", "Upload Excel File:",
-                              accept = c(".xlsx", ".xls")),
-                    downloadButton("downloadData", "Export Data", class = "btn-primary"),
-                    hr(),
-                    actionButton("resetData", "Reset All Data", class = "btn-danger"),
-                    helpText("Warning: This will delete all task data!")
+        ),
+        
+        # Task List tab
+        tabItem(tabName = "tasklist",
+                fluidRow(
+                  box(width = 12, title = "Filter Tasks", status = "primary", solidHeader = TRUE,
+                      fluidRow(
+                        column(3, selectInput("statusFilter", "Status:", 
+                                              c("All", "Idea", "Open", "Closed"), selected = "All")),
+                        column(3, selectInput("categoryFilter", "Category:", c("All"), selected = "All")),
+                        column(3, textInput("nameFilter", "Search by Name:", "")),
+                        column(3, actionButton("applyFilter", "Apply Filter", icon = icon("filter"), 
+                                               class = "btn-primary"))
+                      )
+                  )
+                ),
+                fluidRow(
+                  box(width = 12, title = "Task List", status = "primary", solidHeader = TRUE,
+                      DTOutput("taskTable"),
+                      actionButton("editTaskBtn", "Edit Selected Task", class = "btn-info"),
+                      actionButton("changeStatusBtn", "Change Status", class = "btn-warning")
+                  )
                 )
-              )
+        ),
+        
+        # Add Task tab
+        tabItem(tabName = "addtask",
+                fluidRow(
+                  box(width = 12, title = "Add New Task", status = "success", solidHeader = TRUE,
+                      fluidRow(
+                        column(6, textInput("taskName", "Task Name:", "")),
+                        column(6, selectInput("taskCategory", "Category:", c("Work", "Personal", "Home", "Other")))
+                      ),
+                      fluidRow(
+                        column(4, selectInput("importance", "Importance:", 
+                                              c("Low", "Medium", "High"), selected = "Medium")),
+                        column(4, selectInput("urgency", "Urgency:", 
+                                              c("Low", "Medium", "High"), selected = "Medium")),
+                        column(4, selectInput("status", "Status:", 
+                                              c("Idea", "Open", "Closed"), selected = "Open"))
+                      ),
+                      fluidRow(
+                        column(6, numericInput("estTime", "Estimated Time (hours):", 1, min = 0.1, step = 0.5)),
+                        column(6, textAreaInput("initialNote", "Initial Note:", ""))
+                      ),
+                      actionButton("addTaskBtn", "Add Task", class = "btn-success")
+                  )
+                )
+        ),
+        
+        # Task Notes tab
+        tabItem(tabName = "tasknotes",
+                fluidRow(
+                  box(width = 6, title = "Select Task", status = "info", solidHeader = TRUE,
+                      selectInput("taskForNotes", "Choose Task:", c("Select a task" = "")),
+                      DTOutput("taskNotesList")
+                  ),
+                  box(width = 6, title = "Add Note", status = "success", solidHeader = TRUE,
+                      textAreaInput("newNote", "New Note:", ""),
+                      actionButton("addNoteBtn", "Add Note", class = "btn-success")
+                  )
+                )
+        ),
+        
+        # Settings tab
+        tabItem(tabName = "settings",
+                fluidRow(
+                  box(width = 12, title = "Data Management", status = "warning", solidHeader = TRUE,
+                      fileInput("uploadExcel", "Upload Excel File:",
+                                accept = c(".xlsx", ".xls")),
+                      downloadButton("downloadData", "Export Data", class = "btn-primary"),
+                      hr(),
+                      actionButton("resetData", "Reset All Data", class = "btn-danger"),
+                      helpText("Warning: This will delete all task data!")
+                  )
+                )
+        )
       )
     )
   )
-)
+}
+
+# Secure the app with authentication
+ui <- secure_app(ui, enable_admin = TRUE)
 
 # Define server logic
 server <- function(input, output, session) {
+  # Check and validate credentials
+  res_auth <- secure_server(
+    check_credentials = check_credentials(credentials)
+  )
+  
+  # Store user information
+  user_info <- reactive({
+    credentials[credentials$user == res_auth$user, ]
+  })
+  
+  # Define database path in app directory
+  db_path <- "task_manager.sqlite"
+  
+  # Setup database
+  setup_database(db_path)
+  
   # Reactive values to store data
   rv <- reactiveValues(
-    tasks = data.frame(
-      TaskID = integer(),
-      TaskName = character(),
-      TaskCreateDateTime = character(),
-      TaskCategory = character(),
-      importance = character(),
-      urgency = character(), 
-      status = character(),
-      estimated_time = numeric(),
-      stringsAsFactors = FALSE
-    ),
-    notes = data.frame(
-      NoteID = integer(),
-      TaskID = integer(),
-      NoteDateTime = character(),
-      NoteText = character(),
-      stringsAsFactors = FALSE
-    ),
+    tasks = data.frame(),
+    notes = data.frame(),
     maxTaskID = 0,
     maxNoteID = 0,
     selectedTaskID = NULL
   )
   
-  # Function to generate a new unique TaskID
-  getNewTaskID <- function() {
-    rv$maxTaskID <- rv$maxTaskID + 1
-    return(rv$maxTaskID)
-  }
-  
-  # Function to generate a new unique NoteID
-  getNewNoteID <- function() {
-    rv$maxNoteID <- rv$maxNoteID + 1
-    return(rv$maxNoteID)
-  }
-  
-  # Initialize with some sample data
+  # Initialize data from database
   observe({
+    rv$tasks <- get_all_tasks(db_path)
+    rv$notes <- get_all_notes(db_path)
+    rv$maxTaskID <- get_max_task_id(db_path)
+    rv$maxNoteID <- get_max_note_id(db_path)
+    
+    # Initialize with sample data if database is empty
     if (nrow(rv$tasks) == 0) {
       # Create sample tasks
       sampleTasks <- data.frame(
@@ -189,11 +289,21 @@ server <- function(input, output, session) {
         stringsAsFactors = FALSE
       )
       
+      # Add sample data to database
+      db <- dbConnect(RSQLite::SQLite(), db_path)
+      dbWriteTable(db, "tasks", sampleTasks, append = TRUE, row.names = FALSE)
+      dbWriteTable(db, "notes", sampleNotes, append = TRUE, row.names = FALSE)
+      dbDisconnect(db)
+      
+      # Update reactive values
       rv$tasks <- sampleTasks
       rv$notes <- sampleNotes
-      rv$maxTaskID <- max(sampleTasks$TaskID)
-      rv$maxNoteID <- max(sampleNotes$NoteID)
-      
+      rv$maxTaskID <- 3
+      rv$maxNoteID <- 4
+    }
+    
+    # Update UI elements
+    if (nrow(rv$tasks) > 0) {
       # Update category filter choices
       updateSelectInput(session, "categoryFilter",
                         choices = c("All", unique(rv$tasks$TaskCategory)))
@@ -204,6 +314,18 @@ server <- function(input, output, session) {
                                     setNames(rv$tasks$TaskID, rv$tasks$TaskName)))
     }
   })
+  
+  # Function to generate a new unique TaskID
+  getNewTaskID <- function() {
+    rv$maxTaskID <- rv$maxTaskID + 1
+    return(rv$maxTaskID)
+  }
+  
+  # Function to generate a new unique NoteID
+  getNewNoteID <- function() {
+    rv$maxNoteID <- rv$maxNoteID + 1
+    return(rv$maxNoteID)
+  }
   
   # Handle Excel file upload
   observeEvent(input$uploadExcel, {
@@ -218,6 +340,20 @@ server <- function(input, output, session) {
       # Convert to data frames and ensure consistent column names
       tasks_df <- as.data.frame(tasks_df)
       notes_df <- as.data.frame(notes_df)
+      
+      # Connect to database
+      db <- dbConnect(RSQLite::SQLite(), db_path)
+      
+      # Clear existing tables
+      dbExecute(db, "DELETE FROM notes")
+      dbExecute(db, "DELETE FROM tasks")
+      
+      # Import new data
+      dbWriteTable(db, "tasks", tasks_df, append = TRUE, row.names = FALSE)
+      dbWriteTable(db, "notes", notes_df, append = TRUE, row.names = FALSE)
+      
+      # Disconnect from database
+      dbDisconnect(db)
       
       # Update reactive values
       rv$tasks <- tasks_df
@@ -276,9 +412,13 @@ server <- function(input, output, session) {
     req(nrow(rv$tasks) > 0)
     status_counts <- table(rv$tasks$status)
     colors <- c("Idea" = "orange", "Open" = "blue", "Closed" = "green")
+    
+    # Handle case when not all statuses exist in the data
+    status_colors <- colors[names(status_counts)]
+    
     pie(status_counts, labels = paste0(names(status_counts), " (", status_counts, ")"),
-        col = colors[names(status_counts)], main = "")
-    legend("topright", legend = names(colors), fill = colors, cex = 0.8)
+        col = status_colors, main = "")
+    legend("topright", legend = names(status_colors), fill = status_colors, cex = 0.8)
   })
   
   output$recentTasks <- renderDT({
@@ -350,7 +490,10 @@ server <- function(input, output, session) {
   observeEvent(input$saveNewStatus, {
     req(rv$selectedTaskID)
     
-    # Update the task status
+    # Update the task status in database
+    update_task(db_path, rv$selectedTaskID, list(status = input$newStatus))
+    
+    # Update the task status in reactive data
     taskIndex <- which(rv$tasks$TaskID == rv$selectedTaskID)
     if (length(taskIndex) > 0) {
       rv$tasks$status[taskIndex] <- input$newStatus
@@ -364,6 +507,10 @@ server <- function(input, output, session) {
         stringsAsFactors = FALSE
       )
       
+      # Add note to database
+      add_note(db_path, newNote)
+      
+      # Update reactive data
       rv$notes <- rbind(rv$notes, newNote)
       
       showNotification("Task status updated", type = "message")
@@ -408,7 +555,19 @@ server <- function(input, output, session) {
   observeEvent(input$saveTaskEdit, {
     req(rv$selectedTaskID)
     
-    # Update the task
+    # Prepare updates
+    updates <- list(
+      TaskName = input$editTaskName,
+      TaskCategory = input$editTaskCategory,
+      importance = input$editImportance,
+      urgency = input$editUrgency,
+      estimated_time = input$editEstTime
+    )
+    
+    # Update the task in database
+    update_task(db_path, rv$selectedTaskID, updates)
+    
+    # Update the task in reactive data
     taskIndex <- which(rv$tasks$TaskID == rv$selectedTaskID)
     if (length(taskIndex) > 0) {
       rv$tasks$TaskName[taskIndex] <- input$editTaskName
@@ -426,6 +585,10 @@ server <- function(input, output, session) {
         stringsAsFactors = FALSE
       )
       
+      # Add note to database
+      add_note(db_path, newNote)
+      
+      # Update reactive data
       rv$notes <- rbind(rv$notes, newNote)
       
       # Update task selection dropdown
@@ -459,7 +622,10 @@ server <- function(input, output, session) {
       stringsAsFactors = FALSE
     )
     
-    # Add to tasks dataframe
+    # Add to database
+    add_task(db_path, newTask)
+    
+    # Add to reactive data
     rv$tasks <- rbind(rv$tasks, newTask)
     
     # Add initial note if provided
@@ -472,6 +638,10 @@ server <- function(input, output, session) {
         stringsAsFactors = FALSE
       )
       
+      # Add note to database
+      add_note(db_path, newNote)
+      
+      # Add to reactive data
       rv$notes <- rbind(rv$notes, newNote)
     }
     
@@ -521,6 +691,9 @@ server <- function(input, output, session) {
       stringsAsFactors = FALSE
     )
     
+    # Add to database
+    add_note(db_path, newNote)
+    
     # Add to notes dataframe
     rv$notes <- rbind(rv$notes, newNote)
     
@@ -536,14 +709,24 @@ server <- function(input, output, session) {
       paste("task_manager_export_", format(Sys.time(), "%Y%m%d_%H%M"), ".xlsx", sep = "")
     },
     content = function(file) {
+      # Get the latest data from the database
+      latest_tasks <- get_all_tasks(db_path)
+      latest_notes <- get_all_notes(db_path)
+      
       # Create a list with each dataframe as a sheet
-      data_list <- list(Tasks = rv$tasks, Notes = rv$notes)
+      data_list <- list(Tasks = latest_tasks, Notes = latest_notes)
       writexl::write_xlsx(data_list, file)
     }
   )
   
   # Reset data
   observeEvent(input$resetData, {
+    # Only admin users can reset data
+    if (!user_info()$admin) {
+      showNotification("You need admin privileges to reset data", type = "error")
+      return()
+    }
+    
     showModal(modalDialog(
       title = "Confirm Reset",
       "Are you sure you want to reset all data? This cannot be undone.",
@@ -555,27 +738,19 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$confirmReset, {
-    # Reset all data
-    rv$tasks <- data.frame(
-      TaskID = integer(),
-      TaskName = character(),
-      TaskCreateDateTime = character(),
-      TaskCategory = character(),
-      importance = character(),
-      urgency = character(), 
-      status = character(),
-      estimated_time = numeric(),
-      stringsAsFactors = FALSE
-    )
+    # Connect to database
+    db <- dbConnect(RSQLite::SQLite(), db_path)
     
-    rv$notes <- data.frame(
-      NoteID = integer(),
-      TaskID = integer(),
-      NoteDateTime = character(),
-      NoteText = character(),
-      stringsAsFactors = FALSE
-    )
+    # Clear all data
+    dbExecute(db, "DELETE FROM notes")
+    dbExecute(db, "DELETE FROM tasks")
     
+    # Disconnect from database
+    dbDisconnect(db)
+    
+    # Reset reactive values
+    rv$tasks <- data.frame()
+    rv$notes <- data.frame()
     rv$maxTaskID <- 0
     rv$maxNoteID <- 0
     rv$selectedTaskID <- NULL
