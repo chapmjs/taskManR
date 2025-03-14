@@ -1,4 +1,27 @@
-# Task Manager Shiny App with SQLite Persistence and Authentication
+# Add note from within the edit task modal
+observeEvent(input$addNoteInEdit, {
+  req(rv$selectedTaskID, input$editTaskNewNote != "")
+  
+  # Create new note
+  newNote <- data.frame(
+    NoteID = getNewNoteID(),
+    TaskID = rv$selectedTaskID,
+    NoteDateTime = as.character(now()),
+    NoteText = input$editTaskNewNote,
+    stringsAsFactors = FALSE
+  )
+  
+  # Add to database
+  add_note(db_path, newNote)
+  
+  # Add to notes dataframe
+  rv$notes <- rbind(rv$notes, newNote)
+  
+  # Reset input
+  updateTextAreaInput(session, "editTaskNewNote", value = "")
+  
+  showNotification("Note added", type = "message")
+})# Task Manager Shiny App with SQLite Persistence and Authentication
 # Load required libraries
 library(shiny)
 library(shinydashboard)
@@ -50,51 +73,54 @@ setup_database <- function(db_path) {
     
     # Insert default categories
     categories <- data.frame(
-      CategoryID = 1:43,
+      CategoryID = 1:46,
       CategoryName = c(
-        "1 God",
-        "1 Relationship with God",
-        "2 Spouse",
-        "3 Family",
-        "3.1 Kids One on One",
-        "3.12 Family Finances",
-        "3.2 Family History",
-        "3.3 Family Learning",
-        "3.5 Extended Family",
-        "3.9 Family Chores",
-        "4 Church",
-        "4.2 Young Men",
-        "4.3 Seminary",
-        "5 Work",
-        "5 Work-Education",
-        "5.1 Acequia Group",
-        "5.1100 Research",
-        "5.1128 Learning Analytics",
-        "5.12 Team-Based Learning",
-        "5.13 EVI",
-        "5.13 NVS",
-        "5.134 NVS Idaho",
-        "5.3 SVU",
-        "5.305 BUS 498 Strategic Management",
-        "5.307 BUS 250 Biz Analysis Excel",
-        "5.310 Student Advising",
-        "5.313 BUS 355 Data Science",
-        "5.391 TBL Research",
-        "5.4 BYUI",
-        "5.401 BA 211",
-        "5.402 SCM 461",
-        "5.403 SCM 478",
-        "5.404 SCM 361",
-        "5.405 IBC",
-        "5.41 BYUI TBL",
-        "5.42 SCM Society",
-        "5.43 BYUI Prof-Dev",
-        "5.45 BYUI-Pathways",
-        "5.5 Career-Job Search",
-        "6 Community-Friends",
-        "7 Hobby-Interest",
+        "God",
+        "Relationship with God",
+        "Spouse",
+        "Family",
+        "Family Finances",
+        "Kids One on One",
+        "Family Finances",
+        "Family History",
+        "Family Learning",
+        "Extended Family",
+        "Family Chores",
+        "Church",
+        "Young Men",
+        "Seminary",
+        "Work",
+        "Work-Education",
+        "Acequia Group",
+        "Research",
+        "Learning Analytics",
+        "Team-Based Learning",
+        "EVI",
+        "NVS",
+        "NVS Idaho",
+        "SVU",
+        "BUS 498 Strategic Management",
+        "BUS 250 Biz Analysis Excel",
+        "Student Advising",
+        "BUS 355 Data Science",
+        "TBL Research",
+        "BYUI",
+        "BA 211",
+        "SCM 461",
+        "SCM 478",
+        "SCM 361",
+        "IBC",
+        "BYUI TBL",
+        "SCM Society",
+        "BYUI Prof-Dev",
+        "BYUI-Pathways",
+        "Career-Job Search",
+        "Community-Friends",
+        "Hobby-Interest",
         "Personal",
-        "Personal-Fitness"
+        "Personal-Fitness",
+        "Work",
+        "Home"
       ),
       stringsAsFactors = FALSE
     )
@@ -693,29 +719,58 @@ server <- function(input, output, session) {
     
     # Show a modal for editing
     showModal(modalDialog(
-      title = "Edit Task",
+      title = paste("Edit Task:", taskData$TaskName),
+      size = "l", # Make modal larger
       fluidRow(
-        column(6, textInput("editTaskName", "Task Name:", taskData$TaskName)),
-        column(6, selectInput("editTaskCategory", "Category:", 
-                              setNames(rv$categories$CategoryName, rv$categories$CategoryName),
-                              selected = taskData$TaskCategory))
-      ),
-      fluidRow(
-        column(4, selectInput("editImportance", "Importance:", 
-                              c("Low", "Medium", "High"), 
-                              selected = taskData$importance)),
-        column(4, selectInput("editUrgency", "Urgency:", 
-                              c("Low", "Medium", "High"), 
-                              selected = taskData$urgency)),
-        column(4, numericInput("editEstTime", "Est. Time (hours):", 
-                               value = taskData$estimated_time, 
-                               min = 0.1, step = 0.5))
+        column(6,
+               fluidRow(
+                 column(12, textInput("editTaskName", "Task Name:", taskData$TaskName)),
+                 column(12, selectInput("editTaskCategory", "Category:", 
+                                        setNames(rv$categories$CategoryName, rv$categories$CategoryName),
+                                        selected = taskData$TaskCategory))
+               ),
+               fluidRow(
+                 column(6, selectInput("editImportance", "Importance:", 
+                                       c("Low", "Medium", "High"), 
+                                       selected = taskData$importance)),
+                 column(6, selectInput("editUrgency", "Urgency:", 
+                                       c("Low", "Medium", "High"), 
+                                       selected = taskData$urgency))
+               ),
+               fluidRow(
+                 column(12, numericInput("editEstTime", "Est. Time (hours):", 
+                                         value = taskData$estimated_time, 
+                                         min = 0.1, step = 0.5))
+               )
+        ),
+        column(6,
+               h4("Task Notes"),
+               # Display the notes for this task
+               DTOutput("editTaskNotes"),
+               br(),
+               # Add a new note
+               textAreaInput("editTaskNewNote", "Add Note:", ""),
+               actionButton("addNoteInEdit", "Add Note", class = "btn-success")
+        )
       ),
       footer = tagList(
         modalButton("Cancel"),
         actionButton("saveTaskEdit", "Save Changes", class = "btn-primary")
-      )
+      ),
+      easyClose = FALSE
     ))
+    
+    # Render the notes table inside the modal
+    output$editTaskNotes <- renderDT({
+      req(rv$selectedTaskID)
+      task_notes <- rv$notes %>%
+        filter(TaskID == rv$selectedTaskID) %>%
+        arrange(desc(NoteDateTime)) %>%
+        select(NoteDateTime, NoteText)
+      
+      datatable(task_notes, options = list(pageLength = 5, dom = 't'),
+                rownames = FALSE)
+    })
   })
   
   observeEvent(input$saveTaskEdit, {
