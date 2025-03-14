@@ -23,10 +23,10 @@ setup_database <- function(db_path) {
       TaskName TEXT NOT NULL,
       TaskCreateDateTime TEXT NOT NULL,
       TaskCategory TEXT NOT NULL,
-      importance TEXT NOT NULL,
-      urgency TEXT NOT NULL,
-      status TEXT NOT NULL,
-      estimated_time REAL NOT NULL
+      importance TEXT,
+      urgency TEXT,
+      status TEXT,
+      estimated_time REAL
     )")
   }
   
